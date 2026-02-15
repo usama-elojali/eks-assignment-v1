@@ -1,0 +1,11 @@
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+.terraform/
+.terraform.lock.hcl
+*.plan
+crash.log
+*.pem
+*.key
+.env
+.DS_Store

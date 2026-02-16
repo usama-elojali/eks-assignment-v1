@@ -38,6 +38,38 @@ module "eks" {
   node_capacity_type  = "SPOT"  # 60-70% cheaper!
 }
 
+# ECR Repository for our application
+resource "aws_ecr_repository" "app" {
+  name                 = "${local.cluster_name}-app"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = local.common_tags
+}
+
+# ECR Lifecycle Policy - Keep only last 10 images (cost saving)
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus     = "any"
+        countType     = "imageCountMoreThan"
+        countNumber   = 10
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+
 # Outputs - Values we need for next steps
 output "vpc_id" {
   description = "The VPC ID"
@@ -57,4 +89,9 @@ output "cluster_endpoint" {
 output "configure_kubectl" {
   description = "Command to configure kubectl"
   value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
+}
+
+output "ecr_repository_url" {
+  description = "ECR repository URL"
+  value       = aws_ecr_repository.app.repository_url
 }

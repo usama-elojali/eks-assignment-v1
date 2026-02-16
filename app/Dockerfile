@@ -2,10 +2,10 @@
 
 # Stage 1: Use nginx as our web server
 # nginx:alpine is a lightweight version (~23MB vs ~140MB)
-FROM nginx:1.25-alpine
+FROM nginx:1.27-alpine
 
 # Add labels for documentation
-LABEL maintainer="your-email@example.com"
+LABEL maintainer="usama.elojali@sky.uk"
 LABEL description="EKS Learning Project - Sample Web App"
 LABEL version="1.0"
 

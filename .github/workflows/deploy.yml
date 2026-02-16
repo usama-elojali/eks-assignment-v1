@@ -1,30 +1,61 @@
 name: Build and Deploy to EKS
 
-# When to run this pipeline
+# ============================================================
+# TRIGGER: When does this pipeline run?
+# ============================================================
+# This pipeline runs when:
+# - Code is pushed to the 'main' branch
+# - AND files in the 'app/' directory changed
+# This prevents unnecessary builds when only docs or terraform change
 on:
   push:
     branches:
       - main
     paths:
-      - 'app/**'  # Only run when app files change
+      - 'app/**'
 
-# Environment variables used throughout
+# ============================================================
+# GLOBAL ENVIRONMENT VARIABLES
+# ============================================================
+# These are available to ALL jobs and steps in this workflow
+# AWS_REGION is constant across environments, so we define it here
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: eks-learning-dev-app
-  EKS_CLUSTER_NAME: eks-learning-dev
 
+# ============================================================
+# JOBS: The actual work to be done
+# ============================================================
 jobs:
   deploy:
     name: Build and Deploy
+    
+    # Runner: Use GitHub's hosted Ubuntu machine
+    # This is a fresh VM that runs our pipeline
     runs-on: ubuntu-latest
+
+    # ========================================================
+    # ENVIRONMENT: Links to GitHub Environment settings
+    # ========================================================
+    # This pulls variables and secrets from the 'dev' environment
+    # Variables are accessed via: ${{ vars.VARIABLE_NAME }}
+    # Secrets are accessed via: ${{ secrets.SECRET_NAME }}
+    environment: dev
     
     steps:
-      # Step 1: Check out the code
+      # ======================================================
+      # STEP 1: CHECKOUT CODE
+      # ======================================================
+      # Downloads your repository code to the runner
+      # Without this, the runner has no access to your files
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Configure AWS credentials
+      # ======================================================
+      # STEP 2: CONFIGURE AWS CREDENTIALS
+      # ======================================================
+      # Sets up AWS CLI with your IAM credentials
+      # This allows subsequent steps to interact with AWS services
+      # Secrets come from GitHub Environment secrets
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -32,46 +63,84 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Step 3: Login to Amazon ECR
+      # ======================================================
+      # STEP 3: LOGIN TO AMAZON ECR
+      # ======================================================
+      # Authenticates Docker to your private ECR registry
+      # This is like running: aws ecr get-login-password | docker login
+      # The 'id: login-ecr' lets us reference outputs in later steps
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # Step 4: Build, tag, and push image to ECR
+      # ======================================================
+      # STEP 4: BUILD, TAG, AND PUSH IMAGE
+      # ======================================================
+      # Builds the Docker image and pushes it to ECR
+      # 
+      # Key points:
+      # - --platform linux/amd64: Builds for Intel/AMD (EKS nodes)
+      # - IMAGE_TAG uses git SHA: Unique identifier for each commit
+      # - We also tag as 'latest' for convenience
+      # - ECR_REPOSITORY comes from GitHub Environment variables
       - name: Build, tag, and push image
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Build for amd64 (EKS runs on Intel/AMD)
+          # Build for amd64 architecture (EKS runs on Intel/AMD, not ARM)
+          # This is crucial if you're developing on Apple Silicon Mac!
           docker build \
             --platform linux/amd64 \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             ./app
           
-          # Push both tags
+          # Push both tags to ECR
+          # The SHA tag gives us exact version tracking
+          # The 'latest' tag gives us easy access to newest version
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           
-          # Output the image for next steps
+          # Save the full image URI for use in later steps
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # Step 5: Update kubeconfig
+      # ======================================================
+      # STEP 5: UPDATE KUBECONFIG
+      # ======================================================
+      # Configures kubectl to communicate with your EKS cluster
+      # This is like running: aws eks update-kubeconfig --name <cluster>
+      # After this step, kubectl commands will target your EKS cluster
       - name: Update kubeconfig
+        env:
+          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
         run: |
-          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name $EKS_CLUSTER_NAME
 
-      # Step 6: Deploy to EKS
+      # ======================================================
+      # STEP 6: DEPLOY TO EKS
+      # ======================================================
+      # Updates the deployment with the new image
+      # 
+      # kubectl set image: Updates container image without editing YAML
+      # kubectl rollout status: Waits for deployment to complete
+      # 
+      # If deployment fails, the step fails and pipeline stops
       - name: Deploy to EKS
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Update the image in the deployment
+          # Update the deployment to use the new image
+          # Format: kubectl set image deployment/<name> <container>=<image>
           kubectl set image deployment/eks-sample-app \
             eks-sample-app=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           
-          # Wait for rollout to complete
+          # Wait for the rollout to complete (max 5 minutes)
+          # This ensures the new pods are running before marking success
           kubectl rollout status deployment/eks-sample-app --timeout=300s

@@ -1,0 +1,77 @@
+name: Build and Deploy to EKS
+
+# When to run this pipeline
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'  # Only run when app files change
+
+# Environment variables used throughout
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: eks-learning-dev-app
+  EKS_CLUSTER_NAME: eks-learning-dev
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Check out the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 3: Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Step 4: Build, tag, and push image to ECR
+      - name: Build, tag, and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build for amd64 (EKS runs on Intel/AMD)
+          docker build \
+            --platform linux/amd64 \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            ./app
+          
+          # Push both tags
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          
+          # Output the image for next steps
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # Step 5: Update kubeconfig
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+
+      # Step 6: Deploy to EKS
+      - name: Deploy to EKS
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Update the image in the deployment
+          kubectl set image deployment/eks-sample-app \
+            eks-sample-app=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          
+          # Wait for rollout to complete
+          kubectl rollout status deployment/eks-sample-app --timeout=300s

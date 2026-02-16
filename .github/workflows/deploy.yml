@@ -50,6 +50,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkov Kubernetes Manifest Scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: k8s-manifests/
+          quiet: true
+          soft_fail: true
+          framework: kubernetes
+
       # ======================================================
       # STEP 2: CONFIGURE AWS CREDENTIALS
       # ======================================================
@@ -74,16 +82,10 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # ======================================================
-      # STEP 4: BUILD, TAG, AND PUSH IMAGE
+      # STEP 4: BUILD DOCKER IMAGE
       # ======================================================
-      # Builds the Docker image and pushes it to ECR
-      # 
-      # Key points:
-      # - --platform linux/amd64: Builds for Intel/AMD (EKS nodes)
-      # - IMAGE_TAG uses git SHA: Unique identifier for each commit
-      # - We also tag as 'latest' for convenience
-      # - ECR_REPOSITORY comes from GitHub Environment variables
-      - name: Build, tag, and push image
+      # Builds the Docker image (but doesn't push yet - scan first!)
+      - name: Build Docker image
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -91,24 +93,41 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           # Build for amd64 architecture (EKS runs on Intel/AMD, not ARM)
-          # This is crucial if you're developing on Apple Silicon Mac!
           docker build \
             --platform linux/amd64 \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             ./app
-          
-          # Push both tags to ECR
-          # The SHA tag gives us exact version tracking
-          # The 'latest' tag gives us easy access to newest version
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          
-          # Save the full image URI for use in later steps
+
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       # ======================================================
-      # STEP 5: UPDATE KUBECONFIG
+      # STEP 5: TRIVY IMAGE VULNERABILITY SCAN
+      # ======================================================
+      # Scans the built image for known vulnerabilities (CVEs)
+      - name: Trivy Image Vulnerability Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      # ======================================================
+      # STEP 6: PUSH IMAGE TO ECR
+      # ======================================================
+      # Now that the image passed security scan, push to ECR
+      - name: Push image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      # ======================================================
+      # STEP 7: UPDATE KUBECONFIG
       # ======================================================
       # Configures kubectl to communicate with your EKS cluster
       # This is like running: aws eks update-kubeconfig --name <cluster>
@@ -122,7 +141,7 @@ jobs:
             --name $EKS_CLUSTER_NAME
 
       # ======================================================
-      # STEP 6: DEPLOY TO EKS
+      # STEP 8: DEPLOY TO EKS
       # ======================================================
       # Updates the deployment with the new image
       # 

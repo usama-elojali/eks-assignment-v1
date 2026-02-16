@@ -1,0 +1,9 @@
+# .dockerignore - Files to exclude from Docker build
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
+*.md
+.DS_Store
